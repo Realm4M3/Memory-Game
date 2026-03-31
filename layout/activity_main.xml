@@ -45,6 +45,17 @@
         android:layout_gravity="center"
         android:paddingBottom="8dp" />
 
+    <TextView
+        android:id="@+id/tvBossHp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Boss HP: 3"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:layout_gravity="center"
+        android:visibility="gone"
+        android:paddingBottom="8dp" />
+
     <Button
         android:id="@+id/btnRestart"
         android:layout_width="match_parent"
