@@ -1,5 +1,9 @@
 package com.example.memorygame
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
 import android.app.Activity
 import android.content.Intent
 import android.graphics.drawable.Drawable
@@ -8,6 +12,7 @@ import android.os.CountDownTimer
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -21,17 +26,13 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import android.animation.Animator
-import android.animation.AnimatorListenerAdapter
-import android.animation.AnimatorSet
-import android.animation.ObjectAnimator
-import android.view.animation.AccelerateDecelerateInterpolator
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var recyclerView: RecyclerView
     private lateinit var tvTimer: TextView
     private lateinit var tvScore: TextView
+    private lateinit var tvBossHp: TextView
     private lateinit var spinnerDifficulty: Spinner
     private lateinit var spinnerBackground: Spinner
     private lateinit var btnRestart: Button
@@ -59,7 +60,9 @@ class MainActivity : AppCompatActivity() {
     private var hardMissCount = 0
     private var currentDifficulty = "Easy"
 
-
+    private var alienBoss: AlienBoss? = null
+    private val bossHandler = Handler(Looper.getMainLooper())
+    private var bossRunnable: Runnable? = null
 
     private val createCardLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -85,6 +88,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     buildBoardOnly()
+                    startAlienBossModeIfNeeded()
                 }
             }
         }
@@ -114,6 +118,7 @@ class MainActivity : AppCompatActivity() {
         recyclerView = findViewById(R.id.recyclerViewCards)
         tvTimer = findViewById(R.id.tvTimer)
         tvScore = findViewById(R.id.tvScore)
+        tvBossHp = findViewById(R.id.tvBossHp)
         spinnerDifficulty = findViewById(R.id.spinnerDifficulty)
         spinnerBackground = findViewById(R.id.spinnerBackground)
         btnRestart = findViewById(R.id.btnRestart)
@@ -204,6 +209,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetWholeGame() {
         timer?.cancel()
+        stopAlienBossAttacks()
+
         gameEnded = false
         isBusy = false
         score = 0
@@ -212,6 +219,7 @@ class MainActivity : AppCompatActivity() {
         updateScoreText()
         updateTimerText()
         buildBoardOnly()
+        startAlienBossModeIfNeeded()
         startTimer()
     }
 
@@ -328,7 +336,7 @@ class MainActivity : AppCompatActivity() {
 
         val selectedCard = cards[position]
 
-        if (selectedCard.isFlipped || selectedCard.isMatched) return
+        if (selectedCard.isFlipped || selectedCard.isMatched || selectedCard.isBroken) return
 
         selectedCard.isFlipped = true
         adapter.notifyItemChanged(position)
@@ -364,8 +372,9 @@ class MainActivity : AppCompatActivity() {
             matchedPairs++
             score += 10
             updateScoreText()
-
             hardMissCount = 0
+
+            damageBoss()
 
             firstSelectedIndex = null
             secondSelectedIndex = null
@@ -373,10 +382,15 @@ class MainActivity : AppCompatActivity() {
             adapter.notifyItemChanged(firstIndex)
             adapter.notifyItemChanged(secondIndex)
 
+            if (alienBoss?.isDefeated() == true && currentDifficulty == "Hard") {
+                Toast.makeText(this, "Alien Boss Defeated!", Toast.LENGTH_SHORT).show()
+            }
+
             if (matchedPairs == totalPairs) {
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!gameEnded) {
                         buildBoardOnly()
+                        startAlienBossModeIfNeeded()
                     }
                 }, 400)
             }
@@ -415,12 +429,12 @@ class MainActivity : AppCompatActivity() {
         val childCount = recyclerView.childCount
 
         if (childCount == 0) {
-            val unmatchedCards = cards.filter { !it.isMatched }.toMutableList()
+            val unmatchedCards = cards.filter { !it.isMatched && !it.isBroken }.toMutableList()
             unmatchedCards.shuffle()
 
             var unmatchedIndex = 0
             for (i in cards.indices) {
-                if (!cards[i].isMatched) {
+                if (!cards[i].isMatched && !cards[i].isBroken) {
                     cards[i] = unmatchedCards[unmatchedIndex]
                     unmatchedIndex++
                 }
@@ -481,12 +495,13 @@ class MainActivity : AppCompatActivity() {
                         finishedAnimations++
 
                         if (finishedAnimations == totalAnimations) {
-                            val unmatchedCards = cards.filter { !it.isMatched }.toMutableList()
+                            val unmatchedCards =
+                                cards.filter { !it.isMatched && !it.isBroken }.toMutableList()
                             unmatchedCards.shuffle()
 
                             var unmatchedIndex = 0
                             for (i in cards.indices) {
-                                if (!cards[i].isMatched) {
+                                if (!cards[i].isMatched && !cards[i].isBroken) {
                                     cards[i] = unmatchedCards[unmatchedIndex]
                                     unmatchedIndex++
                                 }
@@ -518,7 +533,81 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun startAlienBossModeIfNeeded() {
+        stopAlienBossAttacks()
+
+        if (currentDifficulty != "Hard") {
+            alienBoss = null
+            tvBossHp.visibility = View.GONE
+            return
+        }
+
+        alienBoss = AlienBoss(3)
+        updateBossHpText()
+        tvBossHp.visibility = View.VISIBLE
+
+        bossRunnable = object : Runnable {
+            override fun run() {
+                if (gameEnded) return
+                val boss = alienBoss ?: return
+
+                if (!boss.isDefeated()) {
+                    bossAttack()
+                    bossHandler.postDelayed(this, 2500)
+                }
+            }
+        }
+
+        bossHandler.postDelayed(bossRunnable!!, 2500)
+    }
+
+    private fun bossAttack() {
+        val availableIndexes = cards.indices.filter {
+            !cards[it].isMatched && !cards[it].isBroken
+        }
+
+        if (availableIndexes.isEmpty()) return
+
+        val randomIndex = availableIndexes.random()
+        val card = cards[randomIndex]
+
+        card.hitCount++
+
+        if (card.hitCount >= 3) {
+            card.isBroken = true
+            card.isFlipped = false
+            Toast.makeText(this, "Alien broke a card!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Alien hit a card! (${card.hitCount}/3)", Toast.LENGTH_SHORT).show()
+        }
+
+        adapter.notifyItemChanged(randomIndex)
+    }
+
+    private fun damageBoss() {
+        if (currentDifficulty == "Hard") {
+            alienBoss?.takeDamage()
+            updateBossHpText()
+
+            if (alienBoss?.isDefeated() == true) {
+                stopAlienBossAttacks()
+            }
+        }
+    }
+
+    private fun updateBossHpText() {
+        val hp = alienBoss?.hp ?: 0
+        tvBossHp.text = "Boss HP: $hp"
+    }
+
+    private fun stopAlienBossAttacks() {
+        bossRunnable?.let { bossHandler.removeCallbacks(it) }
+        bossRunnable = null
+    }
+
     private fun startTimer() {
+        timer?.cancel()
+
         timer = object : CountDownTimer((timeLeftInSeconds * 1000).toLong(), 1000) {
             override fun onTick(millisUntilFinished: Long) {
                 timeLeftInSeconds = (millisUntilFinished / 1000).toInt()
@@ -527,54 +616,64 @@ class MainActivity : AppCompatActivity() {
 
             override fun onFinish() {
                 gameEnded = true
-                isBusy = true
+                stopAlienBossAttacks()
                 tvTimer.text = "Time: 0"
-                showFinalScoreDialog()
+                Toast.makeText(this@MainActivity, "Time's up!", Toast.LENGTH_SHORT).show()
             }
         }.start()
-    }
-
-    private fun showFinalScoreDialog() {
-
-        val message = when {
-            score == 0 -> "lol, you suck"
-            score < 20 -> "you tried..."
-            score < 50 -> "Not bad!"
-            score < 80 -> "Your pretty good with those fingers of yours"
-            else -> "memory master!"
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Time's Up!")
-            .setMessage("$message\n\nYour score: $score")
-            .setPositiveButton("Play Again") { _, _ ->
-                resetWholeGame()
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    private fun updateTimerText() {
-        tvTimer.text = "Time: $timeLeftInSeconds"
     }
 
     private fun updateScoreText() {
         tvScore.text = "Score: $score"
     }
 
+    private fun updateTimerText() {
+        tvTimer.text = "Time: $timeLeftInSeconds"
+    }
+
     private fun changeBuiltInBackground(position: Int) {
-        when (position) {
-            0 -> mainRoot.setBackgroundResource(R.drawable.bg_beach)
-            1 -> mainRoot.setBackgroundResource(R.drawable.bg_forest)
-            2 -> mainRoot.setBackgroundResource(R.drawable.bg_space)
-            3 -> mainRoot.setBackgroundResource(R.drawable.cartoon_bg)
-            4 -> mainRoot.setBackgroundResource(R.drawable.cloud_bg)
+        val backgroundRes = when (position) {
+            0 -> R.drawable.bg_beach
+            1 -> R.drawable.bg_forest
+            2 -> R.drawable.bg_space
+            3 -> R.drawable.cartoon_bg
+            4 -> R.drawable.cloud_bg
+            else -> R.drawable.bg_beach
         }
 
-        mainRoot.animate()
-            .alpha(1f)
-            .setDuration(700)
-            .start()
+        mainRoot.setBackgroundResource(backgroundRes)
+    }
+
+    private fun showCustomCardOptionsDialog() {
+        val options = arrayOf("Create New Card", "Edit Existing Card")
+
+        AlertDialog.Builder(this)
+            .setTitle("Custom Cards")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> openCardEditor(-1)
+                    1 -> showEditCardDialog()
+                }
+            }
+            .show()
+    }
+
+    private fun showEditCardDialog() {
+        if (CustomCardStore.customCardPaths.isEmpty()) {
+            Toast.makeText(this, "No custom cards to edit", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val items = CustomCardStore.customCardPaths.mapIndexed { index, _ ->
+            "Card ${index + 1}"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Choose card to edit")
+            .setItems(items) { _, which ->
+                openCardEditor(which)
+            }
+            .show()
     }
 
     private fun openCardEditor(editIndex: Int) {
@@ -583,37 +682,9 @@ class MainActivity : AppCompatActivity() {
         createCardLauncher.launch(intent)
     }
 
-    private fun showCustomCardOptionsDialog() {
-        val options = mutableListOf<String>()
-
-        if (CustomCardStore.customCardPaths.size < requiredPairs) {
-            options.add("Add new custom card")
-        }
-
-        for (i in CustomCardStore.customCardPaths.indices) {
-            options.add("Edit custom card ${i + 1}")
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Custom Cards")
-            .setItems(options.toTypedArray()) { _, which ->
-                val selected = options[which]
-
-                if (selected == "Add new custom card") {
-                    openCardEditor(-1)
-                } else {
-                    val cardNumber = selected.substringAfter("Edit custom card ").toIntOrNull()
-                    if (cardNumber != null) {
-                        openCardEditor(cardNumber - 1)
-                    }
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
     override fun onDestroy() {
-        timer?.cancel()
         super.onDestroy()
+        stopAlienBossAttacks()
+        timer?.cancel()
     }
 }
